@@ -108,7 +108,7 @@ def get_ai_response(user_id: int, user_message: str) -> str:
     
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=1000,
             system=SYSTEM_PROMPT,
             messages=get_conversation(user_id)
