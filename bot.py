@@ -13,6 +13,7 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters
 )
 import anthropic
+import httpx
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -275,7 +276,60 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             # Fallback without markdown if parsing fails
             await update.message.reply_text(response)
+# ── Voice Message Handler ───────────────────────────────────────────────────────
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
 
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id,
+        action="typing"
+    )
+
+    # Download the voice file from Telegram
+    voice = update.message.voice
+    file = await context.bot.get_file(voice.file_id)
+    file_bytes = await file.download_as_bytearray()
+
+    # Transcribe using OpenAI Whisper API
+    try:
+        import io
+        audio_file = io.BytesIO(bytes(file_bytes))
+        audio_file.name = "voice.ogg"
+
+        transcription_response = httpx.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
+            files={"file": ("voice.ogg", audio_file, "audio/ogg")},
+            data={"model": "whisper-1", "language": "zh"},
+            timeout=30,
+        )
+        transcription_response.raise_for_status()
+        transcribed_text = transcription_response.json()["text"]
+
+        await update.message.reply_text(
+            f"🎤 *已转录 / Transcribed:*\n_{transcribed_text}_",
+            parse_mode="Markdown"
+        )
+
+        # Now process as normal message
+        prompt = transcribed_text
+        mode = context.user_data.get("mode", "chat")
+        if mode == "logging":
+            log_incident(user_id, transcribed_text)
+            prompt = f"我刚刚记录了一个新事件：{transcribed_text}\n\n请帮我分析这个情况的严重性，并告诉我应该如何处理，包括具体该说的话。"
+            context.user_data["mode"] = "chat"
+
+        response = get_ai_response(user_id, prompt)
+        try:
+            await update.message.reply_text(response, parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text(response)
+
+    except Exception as e:
+        logger.error(f"Voice transcription error: {e}")
+        await update.message.reply_text(
+            "⚠️ 语音转录失败，请重试或直接发文字。\n_Voice transcription failed, please retry or type instead._"
+        )
 # ── Main ────────────────────────────────────────────────────────────────────────
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -288,6 +342,7 @@ def main():
     app.add_handler(CommandHandler("rules", rules_command))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     
     logger.info("🤖 Nanny Management Bot starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
